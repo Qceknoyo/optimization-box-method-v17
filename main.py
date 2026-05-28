@@ -1,121 +1,556 @@
 import sys
+from db import get_db_connection, get_user, get_tasks, get_methods, get_users
 import numpy as np
-from PyQt6.QtWidgets import (QApplication, QDoubleSpinBox, QFormLayout, QGroupBox, QSpinBox, QWidget, QVBoxLayout, 
-                             QPushButton, QLabel, QHBoxLayout, QButtonGroup, QLineEdit, QRadioButton, QTabWidget, QTableWidgetItem, QHeaderView, QTableWidget, QComboBox)
+from PyQt6.QtWidgets import (QApplication, QDoubleSpinBox, QFormLayout, QGroupBox, QSpinBox, QWidget, QVBoxLayout, QDialog, QListWidget, QTextEdit,
+                             QPushButton, QLabel, QHBoxLayout, QButtonGroup, QLineEdit, QRadioButton, QTabWidget, QTableWidgetItem, QHeaderView,
+                             QTableWidget, QComboBox, QMessageBox)
 from PyQt6.QtCore import Qt
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+import psycopg2
+import psycopg2.errors
+
 
 class Login(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ОХП - Вход")
-        # Настройка геометрии окна (1/3 экрана)
+
         screen = QApplication.primaryScreen()
-        screen_geometry = screen.availableGeometry() # доступная область (без панели задач)
+        screen_geometry = screen.availableGeometry()
         sw = screen_geometry.width()
         sh = screen_geometry.height()
-        
         width = int(sw / 4)
         height = int(sh / 4)
         x = int((sw - width) / 2)
         y = int((sh - height) / 2)
         self.setGeometry(x, y, width, height)
 
-        # Компоновка (Layout)
-        self.layout = QVBoxLayout()
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+        layout.setContentsMargins(20, 20, 20, 20)
 
-        # Виджеты
+        title = QLabel("Оптимизация химических процессов")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size: 14px; font-weight: bold; margin-bottom: 8px;")
+        layout.addWidget(title)
 
-        self.combo = QComboBox()
-        self.combo.addItems(["Администратор", "Исследователь"])
+        form = QFormLayout()
+        form.setSpacing(6)
 
-        self.login_label = QLabel("Введите логин:")
         self.login_input = QLineEdit()
+        self.login_input.setPlaceholderText("Введите логин")
 
-        self.password_label = QLabel("Введите пароль:")
         self.password_input = QLineEdit()
+        self.password_input.setPlaceholderText("Введите пароль")
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password_input.returnPressed.connect(self.on_click)
 
-        self.button_enter = QPushButton("Вход")
-        
-        self.result_label = QLabel("") 
-        
-        # Логика (Сигналы и Слоты)
+        form.addRow("Логин:", self.login_input)
+        form.addRow("Пароль:", self.password_input)
+        layout.addLayout(form)
+
+        self.button_enter = QPushButton("Войти")
         self.button_enter.clicked.connect(self.on_click)
+        layout.addWidget(self.button_enter)
 
-        # Добавление на экран
-        self.layout.addWidget(self.combo)
-        self.layout.addWidget(self.login_label)
-        self.layout.addWidget(self.login_input)
-        self.layout.addWidget(self.password_label)
-        self.layout.addWidget(self.password_input)
-        self.layout.addWidget(self.button_enter)
-        self.layout.addWidget(self.result_label)
-        
+        self.result_label = QLabel("")
+        self.result_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.result_label.setWordWrap(True)
+        layout.addWidget(self.result_label)
 
-        self.setLayout(self.layout)
+        self.setLayout(layout)
 
     def on_click(self):
-        text = self.login_input.text()
-        if text:
-            self.result_label.setText(f"Привет, {text}!")
+        login = self.login_input.text().strip()
+        password = self.password_input.text()
+
+        if not login or not password:
+            self.result_label.setText("<span style='color: #e74c3c;'>Заполните все поля.</span>")
+            return
+
+        try:
+            user = get_user(login)
+        except Exception as e:
+            self.result_label.setText(f"<span style='color: #e74c3c;'>Ошибка подключения к БД: {e}</span>")
+            return
+
+        if user is None or user["password"] != password:
+            self.result_label.setText("<span style='color: #e74c3c;'>Неверный логин или пароль.</span>")
+            return
+
+        if user["role"] == "admin":
+            self.admin_window = AdminWindow()
+            self.admin_window.show()
+            self.close()
         else:
-            self.result_label.setText("Вы не ввели логин!")
+            self.researcher_window = ResearcherWindow()
+            self.researcher_window.show()
+            self.close()
+
+
+class AdminWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("ОХП - Панель администратора")
+        self.setGeometry(100, 100, 900, 600)
+
+        self.users   = []
+        self.tasks   = []
+        self.methods = []
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+        main_layout.setSpacing(8)
+
+        title = QLabel("Панель администратора")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size: 15px; font-weight: bold; margin-bottom: 4px;")
+        main_layout.addWidget(title)
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._build_users_tab(),   "👤 Пользователи")
+        self.tabs.addTab(self._build_tasks_tab(),   "📋 Задачи")
+        self.tabs.addTab(self._build_methods_tab(), "⚙️ Методы")
+        main_layout.addWidget(self.tabs)
+
+    # ── Пользователи ──
+
+    def _build_users_tab(self):
+        tab = QWidget()
+        layout = QHBoxLayout(tab)
+
+        left = QVBoxLayout()
+        self.user_list = QListWidget()
+        self.user_list.currentRowChanged.connect(self._show_user_info)
+        left.addWidget(self.user_list)
+
+        btns = QHBoxLayout()
+        btn_add  = QPushButton("Добавить")
+        btn_edit = QPushButton("Редактировать")
+        btn_del  = QPushButton("Удалить")
+        btn_add.clicked.connect(self._add_user)
+        btn_edit.clicked.connect(self._edit_user)
+        btn_del.clicked.connect(self._delete_user)
+        for b in (btn_add, btn_edit, btn_del):
+            btns.addWidget(b)
+        left.addLayout(btns)
+
+        right = QVBoxLayout()
+        info_label = QLabel("Информация")
+        info_label.setStyleSheet("font-weight: bold;")
+        self.user_info = QTextEdit()
+        self.user_info.setReadOnly(True)
+        right.addWidget(info_label)
+        right.addWidget(self.user_info)
+
+        layout.addLayout(left,  2)
+        layout.addLayout(right, 1)
+
+        self._refresh_users_from_db()
+        return tab
+
+    def _refresh_users_from_db(self):
+        self.users = list(get_users())
+        self.user_list.clear()
+        for u in self.users:
+            role_text = "Администратор" if u["role"] == "admin" else "Исследователь"
+            self.user_list.addItem(f"{u['username']}  ({role_text})")
+
+    def _show_user_info(self, idx):
+        if idx < 0 or idx >= len(self.users):
+            self.user_info.clear()
+            return
+        u = self.users[idx]
+        role_text = "Администратор" if u["role"] == "admin" else "Исследователь"
+        self.user_info.setHtml(
+            f"<b>Логин:</b> {u['username']}<br>"
+            f"<b>Роль:</b> {role_text}"
+        )
+
+    def _add_user(self):
+        dlg = _UserDialog(parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            username, password, role = dlg.get_data()
+            if not username.strip() or not password.strip():
+                return
+            conn = get_db_connection()
+            cur = conn.cursor()
+            try:
+                cur.execute('INSERT INTO users (username, password, role) VALUES (%s, %s, %s)',
+                            (username, password, role))
+                conn.commit()
+                self._refresh_users_from_db()
+            except psycopg2.errors.UniqueViolation:
+                conn.rollback()
+                QMessageBox.warning(self, "Ошибка", "Пользователь с таким логином уже существует!")
+            finally:
+                cur.close()
+                conn.close()
+
+    def _edit_user(self):
+        idx = self.user_list.currentRow()
+        if idx < 0 or idx >= len(self.users):
+            return
+        u = self.users[idx]
+        dlg = _UserDialog(u["username"], u["password"], u["role"], parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            username, password, role = dlg.get_data()
+            if not username.strip() or not password.strip():
+                return
+            conn = get_db_connection()
+            cur = conn.cursor()
+            try:
+                cur.execute('UPDATE users SET username=%s, password=%s, role=%s WHERE id=%s',
+                            (username, password, role, u["id"]))
+                conn.commit()
+                self._refresh_users_from_db()
+            except psycopg2.errors.UniqueViolation:
+                conn.rollback()
+                QMessageBox.warning(self, "Ошибка", "Пользователь с таким логином уже существует!")
+            finally:
+                cur.close()
+                conn.close()
+
+    def _delete_user(self):
+        idx = self.user_list.currentRow()
+        if idx < 0 or idx >= len(self.users):
+            return
+        u = self.users[idx]
+        if u["username"] == "admin":
+            QMessageBox.warning(self, "Ошибка", "Нельзя удалить пользователя admin!")
+            return
+        reply = QMessageBox.question(self, "Удалить пользователя",
+                                     f'Удалить пользователя "{u["username"]}"?',
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('DELETE FROM users WHERE id=%s', (u["id"],))
+            conn.commit()
+            cur.close()
+            conn.close()
+            self._refresh_users_from_db()
+            self.user_info.clear()
+
+    # ── Задачи ──
+
+    def _build_tasks_tab(self):
+        tab = QWidget()
+        layout = QHBoxLayout(tab)
+
+        left = QVBoxLayout()
+        self.task_list = QListWidget()
+        self.task_list.currentRowChanged.connect(self._show_task_info)
+        left.addWidget(self.task_list)
+
+        btns = QHBoxLayout()
+        btn_add  = QPushButton("Добавить")
+        btn_edit = QPushButton("Редактировать")
+        btn_del  = QPushButton("Удалить")
+        btn_add.clicked.connect(self._add_task)
+        btn_edit.clicked.connect(self._edit_task)
+        btn_del.clicked.connect(self._delete_task)
+        for b in (btn_add, btn_edit, btn_del):
+            btns.addWidget(b)
+        left.addLayout(btns)
+
+        right = QVBoxLayout()
+        info_label = QLabel("Описание")
+        info_label.setStyleSheet("font-weight: bold;")
+        self.task_info = QTextEdit()
+        self.task_info.setReadOnly(True)
+        right.addWidget(info_label)
+        right.addWidget(self.task_info)
+
+        layout.addLayout(left,  2)
+        layout.addLayout(right, 1)
+
+        self._refresh_tasks_from_db()
+        return tab
+
+    def _refresh_tasks_from_db(self):
+        self.tasks = list(get_tasks())
+        self.task_list.clear()
+        for t in self.tasks:
+            self.task_list.addItem(t["title"])
+
+    def _show_task_info(self, idx):
+        if idx < 0 or idx >= len(self.tasks):
+            self.task_info.clear()
+            return
+        t = self.tasks[idx]
+        self.task_info.setHtml(f"<b>{t['title']}</b><br><br>{t['description']}")
+
+    def _add_task(self):
+        dlg = _TextDialog("Новая задача", parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            title, desc = dlg.get_data()
+            if title.strip():
+                conn = get_db_connection()
+                cur = conn.cursor()
+                cur.execute('INSERT INTO tasks (title, description, is_active) VALUES (%s, %s, %s)',
+                            (title, desc, 1))
+                conn.commit()
+                cur.close()
+                conn.close()
+                self._refresh_tasks_from_db()
+
+    def _edit_task(self):
+        idx = self.task_list.currentRow()
+        if idx < 0 or idx >= len(self.tasks):
+            return
+        t = self.tasks[idx]
+        dlg = _TextDialog("Редактировать задачу", t["title"], t["description"], parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            title, desc = dlg.get_data()
+            if title.strip():
+                conn = get_db_connection()
+                cur = conn.cursor()
+                cur.execute('UPDATE tasks SET title=%s, description=%s WHERE id=%s',
+                            (title, desc, t["id"]))
+                conn.commit()
+                cur.close()
+                conn.close()
+                self._refresh_tasks_from_db()
+
+    def _delete_task(self):
+        idx = self.task_list.currentRow()
+        if idx < 0 or idx >= len(self.tasks):
+            return
+        reply = QMessageBox.question(self, "Удалить задачу",
+                                     f'Удалить задачу "{self.tasks[idx]["title"]}"?',
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('DELETE FROM tasks WHERE id=%s', (self.tasks[idx]["id"],))
+            conn.commit()
+            cur.close()
+            conn.close()
+            self._refresh_tasks_from_db()
+            self.task_info.clear()
+
+    # ── Методы ──
+
+    def _build_methods_tab(self):
+        tab = QWidget()
+        layout = QHBoxLayout(tab)
+
+        left = QVBoxLayout()
+        self.method_list = QListWidget()
+        self.method_list.currentRowChanged.connect(self._show_method_info)
+        left.addWidget(self.method_list)
+
+        btns = QHBoxLayout()
+        btn_add  = QPushButton("Добавить")
+        btn_edit = QPushButton("Редактировать")
+        btn_del  = QPushButton("Удалить")
+        btn_add.clicked.connect(self._add_method)
+        btn_edit.clicked.connect(self._edit_method)
+        btn_del.clicked.connect(self._delete_method)
+        for b in (btn_add, btn_edit, btn_del):
+            btns.addWidget(b)
+        left.addLayout(btns)
+
+        right = QVBoxLayout()
+        info_label = QLabel("Описание")
+        info_label.setStyleSheet("font-weight: bold;")
+        self.method_info = QTextEdit()
+        self.method_info.setReadOnly(True)
+        right.addWidget(info_label)
+        right.addWidget(self.method_info)
+
+        layout.addLayout(left,  2)
+        layout.addLayout(right, 1)
+
+        self._refresh_methods_from_db()
+        return tab
+
+    def _refresh_methods_from_db(self):
+        self.methods = list(get_methods())
+        self.method_list.clear()
+        for m in self.methods:
+            self.method_list.addItem(m["name"])
+
+    def _show_method_info(self, idx):
+        if idx < 0 or idx >= len(self.methods):
+            self.method_info.clear()
+            return
+        m = self.methods[idx]
+        self.method_info.setHtml(f"<b>{m['name']}</b><br><br>{m['description']}")
+
+    def _add_method(self):
+        dlg = _TextDialog("Новый метод", parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            name, desc = dlg.get_data()
+            if name.strip():
+                conn = get_db_connection()
+                cur = conn.cursor()
+                cur.execute('INSERT INTO methods (name, description) VALUES (%s, %s)', (name, desc))
+                conn.commit()
+                cur.close()
+                conn.close()
+                self._refresh_methods_from_db()
+
+    def _edit_method(self):
+        idx = self.method_list.currentRow()
+        if idx < 0 or idx >= len(self.methods):
+            return
+        m = self.methods[idx]
+        dlg = _TextDialog("Редактировать метод", m["name"], m["description"], parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            name, desc = dlg.get_data()
+            if name.strip():
+                conn = get_db_connection()
+                cur = conn.cursor()
+                cur.execute('UPDATE methods SET name=%s, description=%s WHERE id=%s',
+                            (name, desc, m["id"]))
+                conn.commit()
+                cur.close()
+                conn.close()
+                self._refresh_methods_from_db()
+
+    def _delete_method(self):
+        idx = self.method_list.currentRow()
+        if idx < 0 or idx >= len(self.methods):
+            return
+        reply = QMessageBox.question(self, "Удалить метод",
+                                     f'Удалить метод "{self.methods[idx]["name"]}"?',
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('DELETE FROM methods WHERE id=%s', (self.methods[idx]["id"],))
+            conn.commit()
+            cur.close()
+            conn.close()
+            self._refresh_methods_from_db()
+            self.method_info.clear()
+
+
+# ── Диалоги ──
+
+class _TextDialog(QDialog):
+    def __init__(self, window_title, title="", description="", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(window_title)
+        self.setMinimumWidth(350)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.title_input = QLineEdit(title)
+        self.desc_input  = QTextEdit(description)
+        self.desc_input.setFixedHeight(80)
+
+        form.addRow("Название:", self.title_input)
+        form.addRow("Описание:", self.desc_input)
+        layout.addLayout(form)
+
+        btns = QHBoxLayout()
+        ok     = QPushButton("Сохранить")
+        cancel = QPushButton("Отмена")
+        ok.clicked.connect(self.accept)
+        cancel.clicked.connect(self.reject)
+        btns.addWidget(ok)
+        btns.addWidget(cancel)
+        layout.addLayout(btns)
+
+    def get_data(self):
+        return self.title_input.text().strip(), self.desc_input.toPlainText().strip()
+
+
+class _UserDialog(QDialog):
+    def __init__(self, username="", password="", role="researcher", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Пользователь")
+        self.setMinimumWidth(300)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.username_input = QLineEdit(username)
+        self.password_input = QLineEdit(password)
+        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+
+        self.role_combo = QComboBox()
+        self.role_combo.addItems(["Исследователь", "Администратор"])
+        self.role_combo.setCurrentIndex(0 if role == "researcher" else 1)
+
+        form.addRow("Логин:",  self.username_input)
+        form.addRow("Пароль:", self.password_input)
+        form.addRow("Роль:",   self.role_combo)
+        layout.addLayout(form)
+
+        btns = QHBoxLayout()
+        ok     = QPushButton("Сохранить")
+        cancel = QPushButton("Отмена")
+        ok.clicked.connect(self.accept)
+        cancel.clicked.connect(self.reject)
+        btns.addWidget(ok)
+        btns.addWidget(cancel)
+        layout.addLayout(btns)
+
+    def get_data(self):
+        role = "researcher" if self.role_combo.currentIndex() == 0 else "admin"
+        return self.username_input.text().strip(), self.password_input.text(), role
+
+
+# ── Окно исследователя ──
 
 class ResearcherWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ОХП - Окно исследователя")
         self.setGeometry(100, 100, 1200, 700)
-        
-        # Горизонтальный layout (левая панель + правая с вкладками)
-        main_layout = QHBoxLayout(self)
-        
-        # ЛЕВАЯ ПАНЕЛЬ 
-        left_panel = QWidget()
-        left_panel.setMaximumWidth(300)
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.addWidget(QLabel("Поля ввода"))
-        left_layout.addStretch()
 
-        #вариант задачи
+        main_layout = QHBoxLayout(self)
+
+        # ЛЕВАЯ ПАНЕЛЬ
+        left_panel = QWidget()
+        left_panel.setMaximumWidth(310)
+        left_layout = QVBoxLayout(left_panel)
+
+        # Вариант задачи
         self.option_label = QLabel("Вариант задачи:")
         self.option_combo = QComboBox()
-        self.option_combo.addItems(["Вариант 17"]) #, "Вариант 67", "Вариант 54"
+        self.tasks = list(get_tasks())
+        for t in self.tasks:
+            self.option_combo.addItem(t["title"])
         self.option_combo.setCurrentIndex(0)
         left_layout.addWidget(self.option_label)
         left_layout.addWidget(self.option_combo)
 
-
         # Вид экстремума
-        extr_layout = QHBoxLayout()  
-        extr_label = QLabel('Вид экстремума:')
-        self.radio_min = QRadioButton('min')
-        # self.radio_max = QRadioButton('max')
+        extr_layout = QHBoxLayout()
+        extr_label = QLabel("Вид экстремума:")
+        self.radio_min = QRadioButton("min")
+        self.radio_max = QRadioButton("max")
         self.radio_min.setChecked(True)
         self.extremum_group = QButtonGroup()
         self.extremum_group.addButton(self.radio_min)
-        # self.extremum_group.addButton(self.radio_max)
+        self.extremum_group.addButton(self.radio_max)
         extr_layout.addWidget(extr_label)
         extr_layout.addWidget(self.radio_min)
-        # extr_layout.addWidget(self.radio_max)
+        extr_layout.addWidget(self.radio_max)
         extr_layout.addStretch()
         left_layout.addLayout(extr_layout)
 
-        method_layout = QHBoxLayout()
-
-        #выбор метода оптимизации
-        method_group = QGroupBox("Метод оптимизации:")
+        # Метод оптимизации
+        method_select_group = QGroupBox("Метод оптимизации:")
+        method_select_layout = QHBoxLayout()
         self.method_combo = QComboBox()
-        self.method_combo.addItems(["Метод Бокса"]) #можно дополнить , "Метод сканирования", "Генетический алгоритм"
+        self.methods = list(get_methods())
+        for m in self.methods:
+            self.method_combo.addItem(m["name"])
         self.method_combo.setCurrentIndex(0)
-        method_layout.addWidget(self.method_combo)
-        method_layout.addStretch()
-        method_group.setLayout(method_layout)
-        left_layout.addWidget(method_group)
+        method_select_layout.addWidget(self.method_combo)
+        method_select_layout.addStretch()
+        method_select_group.setLayout(method_select_layout)
+        left_layout.addWidget(method_select_group)
 
-        # ПАРАМЕТРЫ МАТЕМАТИЧЕСКОЙ МОДЕЛИ 
+        # Параметры математической модели
         params_group = QGroupBox("Параметры математической модели")
         params_layout = QFormLayout()
 
@@ -160,12 +595,10 @@ class ResearcherWindow(QWidget):
         params_layout.addRow("Нормирующий множитель β:", self.spin_beta)
         params_layout.addRow("Нормирующий множитель μ:", self.spin_mu)
         params_layout.addRow("Нормирующий множитель Δ:", self.spin_delta)
-
         params_group.setLayout(params_layout)
         left_layout.addWidget(params_group)
 
-
-        # ОГРАНИЧЕНИЯ 
+        # Ограничения
         limits_group = QGroupBox("Ограничения")
         limits_layout = QFormLayout()
 
@@ -189,14 +622,12 @@ class ResearcherWindow(QWidget):
         limits_layout.addRow("T₁ max (°C):", self.spin_T1_max)
         limits_layout.addRow("T₂ min (°C):", self.spin_T2_min)
         limits_layout.addRow("T₂ max (°C):", self.spin_T2_max)
-
         limits_group.setLayout(limits_layout)
         left_layout.addWidget(limits_group)
 
-
-        # ПАРАМЕТРЫ МЕТОДА 
-        method_group = QGroupBox("Параметры метода")
-        method_layout = QFormLayout()
+        # Параметры метода
+        method_params_group = QGroupBox("Параметры метода")
+        method_params_layout = QFormLayout()
 
         self.spin_eps = QDoubleSpinBox()
         self.spin_eps.setDecimals(3)
@@ -207,22 +638,25 @@ class ResearcherWindow(QWidget):
         self.spin_max_iter.setRange(10, 1000)
         self.spin_max_iter.setValue(50)
 
-        method_layout.addRow("Точность ε:", self.spin_eps)
-        method_layout.addRow("Макс. итераций:", self.spin_max_iter)
         self.spin_grid_size = QSpinBox()
         self.spin_grid_size.setRange(5, 100)
         self.spin_grid_size.setValue(30)
-        method_layout.addRow("Размер сетки:", self.spin_grid_size)
-        
-        method_group.setLayout(method_layout)
-        left_layout.addWidget(method_group)
 
-        #КНОПКИ РАСЧЁТА
-        btns_group = QGroupBox("Расчитать")
+        method_params_layout.addRow("Точность ε:", self.spin_eps)
+        method_params_layout.addRow("Макс. итераций:", self.spin_max_iter)
+        method_params_layout.addRow("Размер сетки:", self.spin_grid_size)
+        method_params_group.setLayout(method_params_layout)
+        left_layout.addWidget(method_params_group)
+
+        # Кнопки расчёта
+        btns_group = QGroupBox("Рассчитать")
         btns_layout = QHBoxLayout()
-        self.calc_btn = QPushButton('Полностью')
+        self.calc_btn = QPushButton("Полностью")
         self.calc_btn.clicked.connect(self.calculate)
-        self.step_btn = QPushButton('Пошагово')
+        self.step_btn = QPushButton("Пошагово")
+        self.step_btn.clicked.connect(self.start_step_mode)
+        self.step_history = []
+        self.current_step = 0
         btns_layout.addWidget(self.calc_btn)
         btns_layout.addWidget(self.step_btn)
         btns_group.setLayout(btns_layout)
@@ -231,36 +665,55 @@ class ResearcherWindow(QWidget):
         self.result_label = QLabel("")
         self.result_label.setWordWrap(True)
         left_layout.addWidget(self.result_label)
+        # Навигация по шагам
+        self.step_nav_widget = QWidget()
+        step_nav_layout = QHBoxLayout(self.step_nav_widget)
 
-        # ПРАВАЯ ПАНЕЛЬ 
+        self.prev_btn = QPushButton("← Назад")
+        self.next_btn = QPushButton("Вперёд →")
+
+        self.prev_btn.clicked.connect(self.prev_step)
+        self.next_btn.clicked.connect(self.next_step)
+
+        step_nav_layout.addWidget(self.prev_btn)
+        step_nav_layout.addWidget(self.next_btn)
+
+        self.step_nav_widget.hide()
+
+        left_layout.addWidget(self.step_nav_widget)
+
+        # Информация о шаге
+        self.step_info = QTextEdit()
+        self.step_info.setReadOnly(True)
+        self.step_info.setMaximumHeight(220)
+        self.step_info.hide()
+
+        left_layout.addWidget(self.step_info)
+
+        left_layout.addStretch()
+
+        # ПРАВАЯ ПАНЕЛЬ
         right_panel = QTabWidget()
-        
-        #Вкладка 1: 2D график 
+
         self.tab_2d = QWidget()
         tab_2d_layout = QVBoxLayout(self.tab_2d)
         self.figure_2d = Figure(facecolor='white')
         self.canvas_2d = FigureCanvas(self.figure_2d)
         tab_2d_layout.addWidget(self.canvas_2d)
         right_panel.addTab(self.tab_2d, "📊 2D - Линии уровня")
-        
-        # Вкладка 2: 3D график
+
         self.tab_3d = QWidget()
         tab_3d_layout = QVBoxLayout(self.tab_3d)
         self.figure_3d = Figure(facecolor='white')
         self.canvas_3d = FigureCanvas(self.figure_3d)
         tab_3d_layout.addWidget(self.canvas_3d)
         right_panel.addTab(self.tab_3d, "🌐 3D - Поверхность отклика")
-        
-        # Вкладка 3: Таблица результатов
+
         self.tab_table = QWidget()
         tab_table_layout = QVBoxLayout(self.tab_table)
-        
-        # Заголовок таблицы
         table_label = QLabel("📋 Значения целевой функции F(T₁, T₂)")
         table_label.setStyleSheet("font-size: 14px; font-weight: bold; margin: 5px;")
         tab_table_layout.addWidget(table_label)
-        
-        # Создание таблицы
         self.result_table = QTableWidget()
         self.result_table.setStyleSheet("""
             QTableWidget {
@@ -276,17 +729,12 @@ class ResearcherWindow(QWidget):
             }
         """)
         tab_table_layout.addWidget(self.result_table)
-        
         right_panel.addTab(self.tab_table, "📋 Таблица значений")
-        
-        # Собираем всё
-        main_layout.addWidget(left_panel, 1)   # l панель 1 часть
-        main_layout.addWidget(right_panel, 3)  # r панель 3 части
-        
-        # Инициализируем пустую таблицу
+
+        main_layout.addWidget(left_panel, 1)
+        main_layout.addWidget(right_panel, 3)
+
         self.init_empty_table()
-    
-    
 
     def box_method(self, func, bounds, constraint, eps=0.1, max_iter=50):
         import random
@@ -306,13 +754,13 @@ class ResearcherWindow(QWidget):
         for _ in range(max_iter):
             values = [func(p[0], p[1]) for p in points]
             worst = np.argmax(values)
-            best = np.argmin(values)
+            best  = np.argmin(values)
             center = [
                 sum(points[j][i] for j in range(N) if j != worst) / (N - 1)
                 for i in range(n)
             ]
             B = (abs(center[0] - points[worst][0]) + abs(center[0] - points[best][0]) +
-                abs(center[1] - points[worst][1]) + abs(center[1] - points[best][1])) / (2*n)
+                 abs(center[1] - points[worst][1]) + abs(center[1] - points[best][1])) / (2 * n)
             if B < eps:
                 break
             new = [2.3 * center[i] - 1.3 * points[worst][i] for i in range(n)]
@@ -325,33 +773,119 @@ class ResearcherWindow(QWidget):
         best_idx = np.argmin(final_vals)
         return points[best_idx][0], points[best_idx][1], final_vals[best_idx]
 
+    def box_method_steps(self, func, bounds, constraint, eps=0.1, max_iter=50):
+        import random
+        n = 2
+        N = 2 * n
+
+        points = []
+
+        max_attempts = 10000
+        attempts = 0
+
+        while len(points) < N and attempts < max_attempts:
+
+            T1 = random.uniform(bounds[0][0], bounds[0][1])
+            T2 = random.uniform(bounds[1][0], bounds[1][1])
+
+            if constraint(T1, T2):
+                points.append([T1, T2])
+
+            attempts += 1
+
+        if len(points) < N:
+            raise ValueError("Не удалось построить начальный комплекс")
+
+        history = []
+
+        for step in range(max_iter):
+
+            values = [func(p[0], p[1]) for p in points]
+
+            worst_idx = np.argmax(values)
+            best_idx = np.argmin(values)
+
+            center = [
+                sum(points[j][i] for j in range(N) if j != worst_idx) / (N - 1)
+                for i in range(n)
+            ]
+
+            B = (
+                abs(center[0] - points[worst_idx][0]) +
+                abs(center[0] - points[best_idx][0]) +
+                abs(center[1] - points[worst_idx][1]) +
+                abs(center[1] - points[best_idx][1])
+            ) / (2 * n)
+
+            history.append({
+                'step': step,
+                'points': [p[:] for p in points],
+                'values': values[:],
+                'best_idx': best_idx,
+                'worst_idx': worst_idx,
+                'center': center[:],
+                'B': B
+            })
+
+            if B < eps:
+                break
+
+            new_point = [
+                2.3 * center[i] - 1.3 * points[worst_idx][i]
+                for i in range(n)
+            ]
+
+            new_point[0] = max(bounds[0][0], min(bounds[0][1], new_point[0]))
+            new_point[1] = max(bounds[1][0], min(bounds[1][1], new_point[1]))
+
+            if not constraint(new_point[0], new_point[1]):
+
+                new_point = [
+                    0.5 * (new_point[i] + center[i])
+                    for i in range(n)
+                ]
+
+            points[worst_idx] = new_point
+
+        return history
+    
     def calculate(self):
-        if self.method_combo.currentText() != "Метод Бокса":
+        method_idx = self.method_combo.currentIndex()
+        if method_idx < 0 or method_idx >= len(self.methods):
+            return
+        method = self.methods[method_idx]
+        if 'метод бокса' not in method['name'].lower():
             self.result_label.setText("⚠️ Реализован только метод Бокса.")
             return
-        if self.option_combo.currentText() != "Вариант 17":
+
+        task_idx = self.option_combo.currentIndex()
+        if task_idx < 0 or task_idx >= len(self.tasks):
+            return
+        task = self.tasks[task_idx]
+        if 'вариант №17' not in task['title'].lower():
             self.result_label.setText("⚠️ Реализован только вариант 17.")
             return
 
-        N = self.spin_N.value()
-        G = self.spin_G.value()
-        A = self.spin_A.value()
-        alpha = self.spin_alpha.value()
-        beta = self.spin_beta.value()
-        mu = self.spin_mu.value()
-        delta = self.spin_delta.value()
+        minimize = self.radio_min.isChecked()
 
-        T1_min = self.spin_T1_min.value()
-        T1_max = self.spin_T1_max.value()
-        T2_min = self.spin_T2_min.value()
-        T2_max = self.spin_T2_max.value()
-        eps = self.spin_eps.value()
-        max_iter = self.spin_max_iter.value()
+        N         = self.spin_N.value()
+        G         = self.spin_G.value()
+        A         = self.spin_A.value()
+        alpha     = self.spin_alpha.value()
+        beta      = self.spin_beta.value()
+        mu        = self.spin_mu.value()
+        delta     = self.spin_delta.value()
+        T1_min    = self.spin_T1_min.value()
+        T1_max    = self.spin_T1_max.value()
+        T2_min    = self.spin_T2_min.value()
+        T2_max    = self.spin_T2_max.value()
+        eps       = self.spin_eps.value()
+        max_iter  = self.spin_max_iter.value()
         grid_size = self.spin_grid_size.value()
 
         def F(T1, T2):
             try:
-                S = (T2 - beta * A) ** N
+                S  = (T2 - beta * A) ** N
                 S += mu * (np.exp(T1 + T2) ** N)
                 S += delta * (T2 - T1)
                 S *= alpha * G
@@ -362,30 +896,33 @@ class ResearcherWindow(QWidget):
             except:
                 return 1e15
 
-        bounds = [(T1_min, T1_max), (T2_min, T2_max)]
+        def F_opt(T1, T2):
+            val = F(T1, T2)
+            return val if minimize else -val
+
+        bounds     = [(T1_min, T1_max), (T2_min, T2_max)]
         constraint = lambda T1, T2: (T2 - T1) >= 1.0
 
         try:
-            T1_opt, T2_opt, F_opt = self.box_method(F, bounds, constraint, eps, max_iter)
+            T1_opt, T2_opt, _ = self.box_method(F_opt, bounds, constraint, eps, max_iter)
         except ValueError as e:
             self.result_label.setText(f"<span style='color:red;'>Ошибка: {str(e)}</span>")
             return
 
+        F_display  = F(T1_opt, T2_opt)
+        extr_label = "min" if minimize else "max"
+
         self.result_label.setText(
-            f"<b>Оптимум найден:</b><br>"
+            f"<b>Оптимум ({extr_label}) найден:</b><br>"
             f"T₁ = {T1_opt:.3f} °C<br>"
             f"T₂ = {T2_opt:.3f} °C<br>"
-            f"<span style='color: #2ecc71; font-size: 16px;'>F = {F_opt:.2f} у.е.</span>"
+            f"<span style='color: #2ecc71; font-size: 16px;'>F = {F_display:.2f} у.е.</span>"
         )
 
-
-        self.result_table.clearContents()
-        self.result_table.setRowCount(0)
-        self.result_table.setColumnCount(0)
-
-
+        # Таблица
         T1_vals = np.linspace(T1_min, T1_max, grid_size)
         T2_vals = np.linspace(T2_min, T2_max, grid_size)
+        self.result_table.clearContents()
         self.result_table.setRowCount(grid_size)
         self.result_table.setColumnCount(grid_size)
         self.result_table.setHorizontalHeaderLabels([f"{v:.1f}" for v in T2_vals])
@@ -408,21 +945,18 @@ class ResearcherWindow(QWidget):
                 self.result_table.setItem(i, j, item)
 
         self.result_table.resizeColumnsToContents()
-        self.result_table.viewport().update()
 
         # 3D
-        self.figure_3d.clear()
-        ax3 = self.figure_3d.add_subplot(111, projection='3d')
         T1g, T2g = np.meshgrid(T1_vals, T2_vals)
         Zg = np.zeros_like(T1g)
         for i in range(grid_size):
             for j in range(grid_size):
-                if constraint(T1g[i, j], T2g[i, j]):
-                    Zg[i, j] = F(T1g[i, j], T2g[i, j])
-                else:
-                    Zg[i, j] = np.nan
+                Zg[i, j] = F(T1g[i, j], T2g[i, j]) if constraint(T1g[i, j], T2g[i, j]) else np.nan
+
+        self.figure_3d.clear()
+        ax3 = self.figure_3d.add_subplot(111, projection='3d')
         surf = ax3.plot_surface(T1g, T2g, Zg, cmap='viridis', alpha=0.8, edgecolor='none')
-        ax3.scatter(T1_opt, T2_opt, F_opt, color='red', s=80, label='Оптимум')
+        ax3.scatter(T1_opt, T2_opt, F_display, color='red', s=80, label='Оптимум')
         ax3.set_xlabel("T₁ (°C)")
         ax3.set_ylabel("T₂ (°C)")
         ax3.set_zlabel("F (у.е.)")
@@ -443,84 +977,180 @@ class ResearcherWindow(QWidget):
         ax2.legend()
         self.figure_2d.colorbar(contour, ax=ax2)
         self.canvas_2d.draw()
+
+    def start_step_mode(self):
+        method_idx = self.method_combo.currentIndex()
+        if method_idx < 0 or method_idx >= len(self.methods):
+            return
+
+        method = self.methods[method_idx]
+
+        if 'метод бокса' not in method['name'].lower():
+            self.result_label.setText("⚠️ Реализован только метод Бокса.")
+            return
+
+        minimize = self.radio_min.isChecked()
+
+        T1_min = self.spin_T1_min.value()
+        T1_max = self.spin_T1_max.value()
+        T2_min = self.spin_T2_min.value()
+        T2_max = self.spin_T2_max.value()
+
+        eps = self.spin_eps.value()
+        max_iter = self.spin_max_iter.value()
+
+        def F(T1, T2):
+            try:
+                S = (T2 - 1) ** 2
+                S += np.exp(T1 + T2) ** 2
+                S += (T2 - T1)
+
+                val = 1000 * S
+
+                if np.isnan(val) or np.isinf(val):
+                    return 1e10
+
+                return val
+
+            except:
+                return 1e10
+
+        def F_opt(T1, T2):
+            val = F(T1, T2)
+            return val if minimize else -val
+
+        bounds = [(T1_min, T1_max), (T2_min, T2_max)]
+
+        constraint = lambda T1, T2: (T2 - T1) >= 1
+
+        self.step_history = self.box_method_steps(
+            F_opt,
+            bounds,
+            constraint,
+            eps,
+            max_iter
+        )
+
+        if not self.step_history:
+            return
+
+        self.current_step = 0
+
+        self.step_nav_widget.show()
+        self.step_info.show()
+
+        self.show_step()
     
+    def show_step(self):
+        if not self.step_history:
+            return
+
+        step = self.step_history[self.current_step]
+
+        self.result_label.setText(
+            f'Шаг {step["step"] + 1} | '
+            f'B = {step["B"]:.4f} | '
+            f'Лучшее F = {min(step["values"]):.5f}'
+        )
+
+        info = f'<b>Шаг {step["step"] + 1}</b><br>'
+        info += f'B = {step["B"]:.4f}<br><br>'
+
+        info += 'Вершины комплекса:<br>'
+
+        for i, (p, v) in enumerate(zip(step['points'], step['values'])):
+
+            mark = ''
+
+            if i == step['best_idx']:
+                mark = ' ← лучшая'
+
+            if i == step['worst_idx']:
+                mark = ' ← худшая'
+
+            info += (
+                f'{i+1}: '
+                f'({p[0]:.2f}, {p[1]:.2f}) '
+                f'F={v:.5f}{mark}<br>'
+            )
+
+        self.step_info.setHtml(info)
+
+        self.figure_2d.clear()
+
+        ax = self.figure_2d.add_subplot(111)
+
+        pts = np.array(step['points'])
+
+        ax.scatter(
+            pts[:, 0],
+            pts[:, 1],
+            c='blue',
+            s=120
+        )
+
+        ax.scatter(
+            pts[step['best_idx'], 0],
+            pts[step['best_idx'], 1],
+            c='green',
+            s=200
+        )
+
+        ax.scatter(
+            pts[step['worst_idx'], 0],
+            pts[step['worst_idx'], 1],
+            c='red',
+            s=200
+        )
+
+        ax.scatter(
+            step['center'][0],
+            step['center'][1],
+            c='cyan',
+            s=220,
+            marker='*'
+        )
+
+        ax.set_title(f'Метод Бокса — шаг {step["step"] + 1}')
+
+        ax.set_xlabel('T1')
+        ax.set_ylabel('T2')
+
+        ax.grid(True)
+
+        self.canvas_2d.draw()
+    
+    def next_step(self):
+        if self.current_step < len(self.step_history) - 1:
+            self.current_step += 1
+            self.show_step()
+    
+    def prev_step(self):
+        if self.current_step > 0:
+            self.current_step -= 1
+            self.show_step()
+
     def init_empty_table(self):
-        """Создаёт пустую таблицу с заголовками"""
-        # Диапазоны T₁ и T₂
-        T1_values = np.linspace(-18, 7, 10)  # 10 значений от -18 до 7
-        T2_values = np.linspace(-8, 8, 10)   # 10 значений от -8 до 8
-        
-        # Округляем для красоты
-        T1_values = [round(x, 1) for x in T1_values]
-        T2_values = [round(x, 1) for x in T2_values]
-        
-        # Настраиваем таблицу
+        T1_values = [round(x, 1) for x in np.linspace(-18, 7, 10)]
+        T2_values = [round(x, 1) for x in np.linspace(-8, 8, 10)]
+
         self.result_table.setRowCount(len(T1_values))
         self.result_table.setColumnCount(len(T2_values))
-        
-        # Горизонтальные заголовки (T₂)
         self.result_table.setHorizontalHeaderLabels([f"{x:.1f}" for x in T2_values])
-        
-        # Вертикальные заголовки (T₁)
         self.result_table.setVerticalHeaderLabels([f"{x:.1f}" for x in T1_values])
-        
-        # Растягиваем столбцы
+
         header = self.result_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        
-        # Заполняем заглушками
+
         for i in range(len(T1_values)):
             for j in range(len(T2_values)):
                 item = QTableWidgetItem("—")
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.result_table.setItem(i, j, item)
-    
-    def fill_table(self, func, resolution=10):
-        """
-        Заполняет таблицу значениями функции func(T1, T2)
-        func — функция, которая принимает T1, T2 и возвращает число
-        """
-        T1_values = np.linspace(-18, 7, resolution)
-        T2_values = np.linspace(-8, 8, resolution)
-        
-        # Округляем для заголовков
-        T1_rounded = [round(x, 1) for x in T1_values]
-        T2_rounded = [round(x, 1) for x in T2_values]
-        
-        # Настраиваем размер таблицы
-        self.result_table.setRowCount(len(T1_values))
-        self.result_table.setColumnCount(len(T2_values))
-        
-        # Устанавливаем заголовки
-        self.result_table.setHorizontalHeaderLabels([f"{x:.1f}" for x in T2_rounded])
-        self.result_table.setVerticalHeaderLabels([f"{x:.1f}" for x in T1_rounded])
-        
-        # Заполняем ячейки
-        for i, T1 in enumerate(T1_values):
-            for j, T2 in enumerate(T2_values):
-                # Проверяем ограничение T₂ - T₁ ≥ 1
-                if T2 - T1 >= 1:
-                    value = func(T1, T2)
-                    if np.isnan(value) or np.isinf(value) or value > 1e9:
-                        item = QTableWidgetItem("∞")
-                        item.setForeground(Qt.GlobalColor.red)
-                    else:
-                        item = QTableWidgetItem(f"{value:.2f}")
-                        item.setForeground(Qt.GlobalColor.darkGreen)
-                else:
-                    item = QTableWidgetItem("❌")
-                    item.setForeground(Qt.GlobalColor.red)
-                
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.result_table.setItem(i, j, item)
-        
-        # Растягиваем столбцы
-        header = self.result_table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
 
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    window = ResearcherWindow()
+    window = Login()
     window.show()
     sys.exit(app.exec())
