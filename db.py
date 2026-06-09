@@ -1,60 +1,85 @@
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import sqlite3
+import os
 
-DB_CONFIG = {
-    "host":     "127.0.0.1",
-    "port":     5432,
-    "dbname":   "mo_chp",       # имя твоей БД
-    "user":     "qceknoyo",     # твой юзер
-    "password": "2108" # твой пароль
-    
-}
-
-_conn = None
+DB_PATH = os.path.join(os.path.dirname(__file__), "mo_chp.db")
 
 def get_db_connection():
-    global _conn
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row  # чтобы обращаться по имени колонки как в psycopg2
+    return conn
 
-    if _conn is None or _conn.closed:
-        _conn = psycopg2.connect(
-        **DB_CONFIG,
-        connect_timeout=3
-    )
-    
-    return _conn
+def _init_db():
+    """Создаёт таблицы и начальные данные если БД ещё не существует"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            role     TEXT NOT NULL DEFAULT 'researcher'
+        );
+        CREATE TABLE IF NOT EXISTS tasks (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            title       TEXT NOT NULL,
+            description TEXT,
+            is_active   INTEGER DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS methods (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL,
+            description TEXT
+        );
+    """)
+    # Начальные данные (только если таблицы пустые)
+    cur.execute("SELECT COUNT(*) FROM users")
+    if cur.fetchone()[0] == 0:
+        cur.executescript("""
+            INSERT INTO users (username, password, role) VALUES ('admin', 'admin', 'admin');
+            INSERT INTO users (username, password, role) VALUES ('user', 'user', 'researcher');
+            INSERT INTO tasks (title, description) VALUES ('Вариант №17', 'Оптимизация себестоимости химического процесса');
+            INSERT INTO methods (name, description) VALUES ('Метод Бокса', 'Метод деформируемого комплекса (метод Бокса) для условной оптимизации');
+            INSERT INTO methods (name, description) VALUES ('Метод координатного спуска', 'Поочерёдная оптимизация по каждой переменной при фиксированных остальных');
+        """)
+    conn.commit()
+    cur.close()
+    conn.close()
 
 def get_user(username):
     conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute('SELECT * FROM users WHERE username = %s', (username,))
+    cur = conn.cursor()
+    cur.execute('SELECT * FROM users WHERE username = ?', (username,))
     user = cur.fetchone()
     cur.close()
-
+    conn.close()
     return user
 
 def get_tasks():
     conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur = conn.cursor()
     cur.execute('SELECT * FROM tasks ORDER BY id')
     tasks = cur.fetchall()
     cur.close()
-
+    conn.close()
     return tasks
 
 def get_methods():
     conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur = conn.cursor()
     cur.execute('SELECT * FROM methods ORDER BY id')
     methods = cur.fetchall()
     cur.close()
-
+    conn.close()
     return methods
 
 def get_users():
     conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur = conn.cursor()
     cur.execute('SELECT * FROM users ORDER BY id')
     users = cur.fetchall()
     cur.close()
-
+    conn.close()
     return users
+
+# Инициализируем БД при импорте
+_init_db()

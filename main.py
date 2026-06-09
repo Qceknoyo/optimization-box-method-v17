@@ -7,8 +7,7 @@ from PyQt6.QtWidgets import (QApplication, QDoubleSpinBox, QFormLayout, QGroupBo
 from PyQt6.QtCore import Qt
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-import psycopg2
-import psycopg2.errors
+import sqlite3
 
 
 class Login(QWidget):
@@ -177,12 +176,12 @@ class AdminWindow(QWidget):
             conn = get_db_connection()
             cur = conn.cursor()
             try:
-                cur.execute('INSERT INTO users (username, password, role) VALUES (%s, %s, %s)',
+                cur.execute('INSERT INTO users (username, password, role) VALUES (?, ?, ?)',
                             (username, password, role))
                 conn.commit()
                 self._refresh_users_from_db()
-            except psycopg2.errors.UniqueViolation:
-                conn.rollback()
+            except sqlite3.IntegrityError:
+                pass
                 QMessageBox.warning(self, "Ошибка", "Пользователь с таким логином уже существует!")
             finally:
                 cur.close()
@@ -201,12 +200,12 @@ class AdminWindow(QWidget):
             conn = get_db_connection()
             cur = conn.cursor()
             try:
-                cur.execute('UPDATE users SET username=%s, password=%s, role=%s WHERE id=%s',
+                cur.execute('UPDATE users SET username=?, password=?, role=? WHERE id=?',
                             (username, password, role, u["id"]))
                 conn.commit()
                 self._refresh_users_from_db()
-            except psycopg2.errors.UniqueViolation:
-                conn.rollback()
+            except sqlite3.IntegrityError:
+                pass
                 QMessageBox.warning(self, "Ошибка", "Пользователь с таким логином уже существует!")
             finally:
                 cur.close()
@@ -226,7 +225,7 @@ class AdminWindow(QWidget):
         if reply == QMessageBox.StandardButton.Yes:
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute('DELETE FROM users WHERE id=%s', (u["id"],))
+            cur.execute('DELETE FROM users WHERE id=?', (u["id"],))
             conn.commit()
             cur.close()
             conn.close()
@@ -289,7 +288,7 @@ class AdminWindow(QWidget):
             if title.strip():
                 conn = get_db_connection()
                 cur = conn.cursor()
-                cur.execute('INSERT INTO tasks (title, description, is_active) VALUES (%s, %s, %s)',
+                cur.execute('INSERT INTO tasks (title, description, is_active) VALUES (?, ?, ?)',
                             (title, desc, 1))
                 conn.commit()
                 cur.close()
@@ -307,7 +306,7 @@ class AdminWindow(QWidget):
             if title.strip():
                 conn = get_db_connection()
                 cur = conn.cursor()
-                cur.execute('UPDATE tasks SET title=%s, description=%s WHERE id=%s',
+                cur.execute('UPDATE tasks SET title=?, description=? WHERE id=?',
                             (title, desc, t["id"]))
                 conn.commit()
                 cur.close()
@@ -324,7 +323,7 @@ class AdminWindow(QWidget):
         if reply == QMessageBox.StandardButton.Yes:
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute('DELETE FROM tasks WHERE id=%s', (self.tasks[idx]["id"],))
+            cur.execute('DELETE FROM tasks WHERE id=?', (self.tasks[idx]["id"],))
             conn.commit()
             cur.close()
             conn.close()
@@ -387,7 +386,7 @@ class AdminWindow(QWidget):
             if name.strip():
                 conn = get_db_connection()
                 cur = conn.cursor()
-                cur.execute('INSERT INTO methods (name, description) VALUES (%s, %s)', (name, desc))
+                cur.execute('INSERT INTO methods (name, description) VALUES (?, ?)', (name, desc))
                 conn.commit()
                 cur.close()
                 conn.close()
@@ -404,7 +403,7 @@ class AdminWindow(QWidget):
             if name.strip():
                 conn = get_db_connection()
                 cur = conn.cursor()
-                cur.execute('UPDATE methods SET name=%s, description=%s WHERE id=%s',
+                cur.execute('UPDATE methods SET name=?, description=? WHERE id=?',
                             (name, desc, m["id"]))
                 conn.commit()
                 cur.close()
@@ -421,7 +420,7 @@ class AdminWindow(QWidget):
         if reply == QMessageBox.StandardButton.Yes:
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute('DELETE FROM methods WHERE id=%s', (self.methods[idx]["id"],))
+            cur.execute('DELETE FROM methods WHERE id=?', (self.methods[idx]["id"],))
             conn.commit()
             cur.close()
             conn.close()
