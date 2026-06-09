@@ -632,7 +632,7 @@ class ResearcherWindow(QWidget):
         self.spin_eps = QDoubleSpinBox()
         self.spin_eps.setDecimals(3)
         self.spin_eps.setRange(0.001, 1)
-        self.spin_eps.setValue(0.1)
+        self.spin_eps.setValue(0.01)
 
         self.spin_max_iter = QSpinBox()
         self.spin_max_iter.setRange(10, 1000)
@@ -750,7 +750,8 @@ class ResearcherWindow(QWidget):
                 points.append([T1, T2])
             attempts += 1
         if len(points) < N:
-            raise ValueError(f"Не удалось найти {N} допустимых точек. Проверьте ограничения.")
+            raise ValueError(f"Не удалось найти {N} допустимых точек.")
+
         for _ in range(max_iter):
             values = [func(p[0], p[1]) for p in points]
             worst = np.argmax(values)
@@ -760,92 +761,345 @@ class ResearcherWindow(QWidget):
                 for i in range(n)
             ]
             B = (abs(center[0] - points[worst][0]) + abs(center[0] - points[best][0]) +
-                 abs(center[1] - points[worst][1]) + abs(center[1] - points[best][1])) / (2 * n)
+                abs(center[1] - points[worst][1]) + abs(center[1] - points[best][1])) / (2 * n)
             if B < eps:
                 break
+
+            # Шаг 6: новая точка
             new = [2.3 * center[i] - 1.3 * points[worst][i] for i in range(n)]
+
+            # Шаг 7: ограничения 1-го рода
             new[0] = max(bounds[0][0], min(bounds[0][1], new[0]))
             new[1] = max(bounds[1][0], min(bounds[1][1], new[1]))
-            if not constraint(new[0], new[1]):
+
+            # Шаг 7: ограничения 2-го рода
+            for _ in range(100):
+                if constraint(new[0], new[1]):
+                    break
                 new = [0.5 * (new[i] + center[i]) for i in range(n)]
+
+            # ШАГ 9: если новая точка хуже худшей — смещаем к лучшей
+            F_new   = func(new[0], new[1])
+            F_worst = values[worst]
+            for _ in range(100):
+                if F_new <= F_worst:
+                    break
+                new = [0.5 * (new[i] + points[best][i]) for i in range(n)]
+                F_new = func(new[0], new[1])
+
             points[worst] = new
+
         final_vals = [func(p[0], p[1]) for p in points]
         best_idx = np.argmin(final_vals)
         return points[best_idx][0], points[best_idx][1], final_vals[best_idx]
+    
+    def coordinate_search(self, func, bounds, constraint,
+                        eps=0.1, max_iter=100):
 
-    def box_method_steps(self, func, bounds, constraint, eps=0.1, max_iter=50):
-        import random
-        n = 2
-        N = 2 * n
+        T1 = (bounds[0][0] + bounds[0][1]) / 2
+        T2 = (bounds[1][0] + bounds[1][1]) / 2
 
-        points = []
+        while not constraint(T1, T2):
+            T2 += 1
 
-        max_attempts = 10000
-        attempts = 0
+        step = 1.0
 
-        while len(points) < N and attempts < max_attempts:
+        best_value = func(T1, T2)
 
-            T1 = random.uniform(bounds[0][0], bounds[0][1])
-            T2 = random.uniform(bounds[1][0], bounds[1][1])
+        for _ in range(max_iter):
 
-            if constraint(T1, T2):
-                points.append([T1, T2])
+            improved = False
 
-            attempts += 1
+            candidates = [
+                (T1 + step, T2),
+                (T1 - step, T2),
+                (T1, T2 + step),
+                (T1, T2 - step)
+            ]
 
-        if len(points) < N:
-            raise ValueError("Не удалось построить начальный комплекс")
+            for new_T1, new_T2 in candidates:
+
+                if not constraint(new_T1, new_T2):
+                    continue
+
+                if not (bounds[0][0] <= new_T1 <= bounds[0][1]):
+                    continue
+
+                if not (bounds[1][0] <= new_T2 <= bounds[1][1]):
+                    continue
+
+                value = func(new_T1, new_T2)
+
+                if value < best_value:
+
+                    T1 = new_T1
+                    T2 = new_T2
+
+                    best_value = value
+
+                    improved = True
+
+            if not improved:
+                step /= 2
+
+            if step < eps:
+                break
+
+        return T1, T2, best_value
+    
+    def coordinate_search_steps(self, func, bounds, constraint,
+                                eps=0.1, max_iter=100):
+
+        T1 = (bounds[0][0] + bounds[0][1]) / 2
+        T2 = (bounds[1][0] + bounds[1][1]) / 2
+
+        while not constraint(T1, T2):
+            T2 += 1
+
+        step_size = 1.0
+
+        best_value = func(T1, T2)
 
         history = []
 
+        for iteration in range(max_iter):
+
+            T1_prev = T1
+            T2_prev = T2
+
+            improved = False
+
+            candidates = [
+                (T1 + step_size, T2),
+                (T1 - step_size, T2),
+                (T1, T2 + step_size),
+                (T1, T2 - step_size)
+            ]
+
+            for new_T1, new_T2 in candidates:
+
+                if not constraint(new_T1, new_T2):
+                    continue
+
+                if not (bounds[0][0] <= new_T1 <= bounds[0][1]):
+                    continue
+
+                if not (bounds[1][0] <= new_T2 <= bounds[1][1]):
+                    continue
+
+                value = func(new_T1, new_T2)
+
+                if value < best_value:
+                    T1 = new_T1
+                    T2 = new_T2
+                    best_value = value
+                    improved = True
+
+            history.append({
+                "step": iteration,
+                "T1": T1,
+                "T2": T2,
+                "F": best_value,
+                "delta": step_size,
+                "T1_prev": T1_prev,
+                "T2_prev": T2_prev
+            })
+
+            if not improved:
+                step_size /= 2
+
+            if step_size < eps:
+                break
+
+        return history
+
+    def box_method_steps(
+            self,
+            func,
+            bounds,
+            constraint,
+            eps=0.1,
+            max_iter=50,
+            initial_points=None
+    ):
+        import random
+
+        n = 2
+        N = 2 * n
+
+        # --------------------------
+        # Формирование комплекса
+        # --------------------------
+
+        if initial_points is not None:
+
+            points = [p[:] for p in initial_points]
+
+        else:
+
+            points = []
+
+            attempts = 0
+
+            while len(points) < N and attempts < 10000:
+
+                T1 = random.uniform(bounds[0][0], bounds[0][1])
+                T2 = random.uniform(bounds[1][0], bounds[1][1])
+
+                if constraint(T1, T2):
+                    points.append([T1, T2])
+
+                attempts += 1
+
+            if len(points) < N:
+                raise ValueError(
+                    "Не удалось построить начальный комплекс"
+                )
+
+        history = []
+
+        # --------------------------
+        # Основной цикл метода Бокса
+        # --------------------------
+
         for step in range(max_iter):
 
-            values = [func(p[0], p[1]) for p in points]
+            values = [
+                func(p[0], p[1])
+                for p in points
+            ]
 
             worst_idx = np.argmax(values)
             best_idx = np.argmin(values)
 
             center = [
-                sum(points[j][i] for j in range(N) if j != worst_idx) / (N - 1)
+
+                sum(
+                    points[j][i]
+                    for j in range(N)
+                    if j != worst_idx
+                ) / (N - 1)
+
                 for i in range(n)
             ]
 
             B = (
+
                 abs(center[0] - points[worst_idx][0]) +
                 abs(center[0] - points[best_idx][0]) +
+
                 abs(center[1] - points[worst_idx][1]) +
                 abs(center[1] - points[best_idx][1])
+
             ) / (2 * n)
 
             history.append({
-                'step': step,
-                'points': [p[:] for p in points],
-                'values': values[:],
-                'best_idx': best_idx,
-                'worst_idx': worst_idx,
-                'center': center[:],
-                'B': B
+
+                "step": step,
+
+                "points": [p[:] for p in points],
+
+                "values": values[:],
+
+                "best_idx": best_idx,
+
+                "worst_idx": worst_idx,
+
+                "center": center[:],
+
+                "B": B
+
             })
 
+            # критерий остановки
             if B < eps:
                 break
 
+            # --------------------------
+            # отражение
+            # --------------------------
+
             new_point = [
-                2.3 * center[i] - 1.3 * points[worst_idx][i]
+
+                2.3 * center[i]
+                - 1.3 * points[worst_idx][i]
+
                 for i in range(n)
             ]
 
-            new_point[0] = max(bounds[0][0], min(bounds[0][1], new_point[0]))
-            new_point[1] = max(bounds[1][0], min(bounds[1][1], new_point[1]))
+            # --------------------------
+            # ограничения первого рода
+            # --------------------------
 
-            if not constraint(new_point[0], new_point[1]):
+            new_point[0] = max(
+                bounds[0][0],
+                min(bounds[0][1], new_point[0])
+            )
+
+            new_point[1] = max(
+                bounds[1][0],
+                min(bounds[1][1], new_point[1])
+            )
+
+            # --------------------------
+            # ограничения второго рода
+            # --------------------------
+
+            for _ in range(100):
+
+                if constraint(
+                    new_point[0],
+                    new_point[1]
+                ):
+                    break
 
                 new_point = [
-                    0.5 * (new_point[i] + center[i])
+
+                    0.5 * (
+                        new_point[i]
+                        + center[i]
+                    )
+
                     for i in range(n)
                 ]
 
+            # --------------------------
+            # шаг 9 метода Бокса
+            # --------------------------
+
+            F_new = func(
+                new_point[0],
+                new_point[1]
+            )
+
+            F_worst = values[worst_idx]
+
+            for _ in range(100):
+
+                if F_new <= F_worst:
+                    break
+
+                new_point = [
+
+                    0.5 * (
+                        new_point[i]
+                        + points[best_idx][i]
+                    )
+
+                    for i in range(n)
+                ]
+
+                F_new = func(
+                    new_point[0],
+                    new_point[1]
+                )
+
+            # --------------------------
+            # замена худшей точки
+            # --------------------------
+
             points[worst_idx] = new_point
+            
 
         return history
     
@@ -853,10 +1107,8 @@ class ResearcherWindow(QWidget):
         method_idx = self.method_combo.currentIndex()
         if method_idx < 0 or method_idx >= len(self.methods):
             return
+        
         method = self.methods[method_idx]
-        if 'метод бокса' not in method['name'].lower():
-            self.result_label.setText("⚠️ Реализован только метод Бокса.")
-            return
 
         task_idx = self.option_combo.currentIndex()
         if task_idx < 0 or task_idx >= len(self.tasks):
@@ -904,9 +1156,34 @@ class ResearcherWindow(QWidget):
         constraint = lambda T1, T2: (T2 - T1) >= 1.0
 
         try:
-            T1_opt, T2_opt, _ = self.box_method(F_opt, bounds, constraint, eps, max_iter)
+
+            if 'метод бокса' in method['name'].lower():
+                T1_opt, T2_opt, _ = self.box_method(
+                    F_opt,
+                    bounds,
+                    constraint,
+                    eps,
+                    max_iter
+                )
+
+            elif 'метод координатного спуска' in method['name'].lower():
+                T1_opt, T2_opt, _ = self.coordinate_search(
+                    F_opt,
+                    bounds,
+                    constraint,
+                    eps,
+                    max_iter
+                )
+
+            else:
+                self.result_label.setText("⚠️ Метод не реализован.")
+                return
+
         except ValueError as e:
-            self.result_label.setText(f"<span style='color:red;'>Ошибка: {str(e)}</span>")
+
+            self.result_label.setText(
+                f"<span style='color:red;'>Ошибка: {str(e)}</span>"
+            )
             return
 
         F_display  = F(T1_opt, T2_opt)
@@ -946,7 +1223,7 @@ class ResearcherWindow(QWidget):
 
         self.result_table.resizeColumnsToContents()
 
-        # 3D
+        # 3Dа
         T1g, T2g = np.meshgrid(T1_vals, T2_vals)
         Zg = np.zeros_like(T1g)
         for i in range(grid_size):
@@ -984,94 +1261,90 @@ class ResearcherWindow(QWidget):
             return
 
         method = self.methods[method_idx]
+        is_box   = 'метод бокса' in method['name'].lower()
+        is_coord = 'координатного' in method['name'].lower()
 
-        if 'метод бокса' not in method['name'].lower():
-            self.result_label.setText("⚠️ Реализован только метод Бокса.")
+        if not is_box and not is_coord:
+            self.result_label.setText("⚠️ Пошаговый режим реализован только для метода Бокса и координатного спуска.")
             return
 
         minimize = self.radio_min.isChecked()
-
-        T1_min = self.spin_T1_min.value()
-        T1_max = self.spin_T1_max.value()
-        T2_min = self.spin_T2_min.value()
-        T2_max = self.spin_T2_max.value()
-
-        eps = self.spin_eps.value()
+        T1_min   = self.spin_T1_min.value()
+        T1_max   = self.spin_T1_max.value()
+        T2_min   = self.spin_T2_min.value()
+        T2_max   = self.spin_T2_max.value()
+        eps      = self.spin_eps.value()
         max_iter = self.spin_max_iter.value()
+        N        = self.spin_N.value()
+        G        = self.spin_G.value()
+        A        = self.spin_A.value()
+        alpha    = self.spin_alpha.value()
+        beta     = self.spin_beta.value()
+        mu       = self.spin_mu.value()
+        delta    = self.spin_delta.value()
 
         def F(T1, T2):
             try:
-                S = (T2 - 1) ** 2
-                S += np.exp(T1 + T2) ** 2
-                S += (T2 - T1)
-
-                val = 1000 * S
-
-                if np.isnan(val) or np.isinf(val):
-                    return 1e10
-
+                S  = (T2 - beta * A) ** N
+                S += mu * (np.exp(T1 + T2) ** N)
+                S += delta * (T2 - T1)
+                S *= alpha * G
+                val = 1000.0 * S
+                if np.isnan(val) or np.isinf(val) or val < 0:
+                    return 1e15
                 return val
-
             except:
-                return 1e10
+                return 1e15
 
         def F_opt(T1, T2):
             val = F(T1, T2)
             return val if minimize else -val
 
-        bounds = [(T1_min, T1_max), (T2_min, T2_max)]
-
+        bounds     = [(T1_min, T1_max), (T2_min, T2_max)]
         constraint = lambda T1, T2: (T2 - T1) >= 1
 
-        self.step_history = self.box_method_steps(
-            F_opt,
-            bounds,
-            constraint,
-            eps,
-            max_iter
-        )
+        if is_box:
+            self.step_method_type = 'box'
+            self.step_history = self.box_method_steps(F_opt, bounds, constraint, eps, max_iter)
+        else:
+            self.step_method_type = 'coord'
+            self.step_history = self.coordinate_search_steps(F_opt, bounds, constraint, eps, max_iter)
 
         if not self.step_history:
             return
 
         self.current_step = 0
-
         self.step_nav_widget.show()
         self.step_info.show()
-
         self.show_step()
     
-    def show_step(self):
-        if not self.step_history:
-            return
-
-        step = self.step_history[self.current_step]
+    def show_box_step(self, step):
 
         self.result_label.setText(
             f'Шаг {step["step"] + 1} | '
-            f'B = {step["B"]:.4f} | '
-            f'Лучшее F = {min(step["values"]):.5f}'
+            f'B = {step["B"]:.4f}'
         )
 
         info = f'<b>Шаг {step["step"] + 1}</b><br>'
-        info += f'B = {step["B"]:.4f}<br><br>'
+        info += f'Критерий B = {step["B"]:.4f}<br><br>'
 
         info += 'Вершины комплекса:<br>'
 
-        for i, (p, v) in enumerate(zip(step['points'], step['values'])):
+        for i, (p, v) in enumerate(zip(step["points"], step["values"])):
 
-            mark = ''
+            mark = ""
 
-            if i == step['best_idx']:
-                mark = ' ← лучшая'
+            if i == step["best_idx"]:
+                mark += " ← лучшая"
 
-            if i == step['worst_idx']:
-                mark = ' ← худшая'
+            if i == step["worst_idx"]:
+                mark += " ← худшая"
 
             info += (
                 f'{i+1}: '
-                f'({p[0]:.2f}, {p[1]:.2f}) '
-                f'F={v:.5f}{mark}<br>'
+                f'({p[0]:.3f}, {p[1]:.3f}) '
+                f'F={v:.3f}'
+                f'{mark}<br>'
             )
 
         self.step_info.setHtml(info)
@@ -1080,45 +1353,109 @@ class ResearcherWindow(QWidget):
 
         ax = self.figure_2d.add_subplot(111)
 
-        pts = np.array(step['points'])
+        pts = np.array(step["points"])
 
         ax.scatter(
-            pts[:, 0],
-            pts[:, 1],
-            c='blue',
+            pts[:,0],
+            pts[:,1],
             s=120
         )
 
         ax.scatter(
-            pts[step['best_idx'], 0],
-            pts[step['best_idx'], 1],
-            c='green',
-            s=200
-        )
-
-        ax.scatter(
-            pts[step['worst_idx'], 0],
-            pts[step['worst_idx'], 1],
-            c='red',
-            s=200
-        )
-
-        ax.scatter(
-            step['center'][0],
-            step['center'][1],
-            c='cyan',
+            pts[step["best_idx"],0],
+            pts[step["best_idx"],1],
             s=220,
-            marker='*'
+            c='green'
         )
 
-        ax.set_title(f'Метод Бокса — шаг {step["step"] + 1}')
+        ax.scatter(
+            pts[step["worst_idx"],0],
+            pts[step["worst_idx"],1],
+            s=220,
+            c='red'
+        )
 
-        ax.set_xlabel('T1')
-        ax.set_ylabel('T2')
+        ax.scatter(
+            step["center"][0],
+            step["center"][1],
+            s=250,
+            marker='*',
+            c='orange'
+        )
+
+        ax.set_title(
+            f'Метод Бокса — шаг {step["step"] + 1}'
+        )
 
         ax.grid(True)
 
         self.canvas_2d.draw()
+
+    def show_coordinate_step(self, step):
+
+        self.result_label.setText(
+            f'Шаг {step["step"] + 1} | '
+            f'F = {step["F"]:.4f}'
+        )
+
+        info = f'<b>Шаг {step["step"] + 1}</b><br><br>'
+
+        info += f'T1 = {step["T1"]:.4f}<br>'
+        info += f'T2 = {step["T2"]:.4f}<br>'
+        info += f'δ = {step["delta"]:.4f}<br>'
+        info += f'F = {step["F"]:.4f}<br>'
+
+        self.step_info.setHtml(info)
+
+        self.figure_2d.clear()
+
+        ax = self.figure_2d.add_subplot(111)
+
+        trajectory_x = []
+        trajectory_y = []
+
+        for s in self.step_history[:self.current_step + 1]:
+            trajectory_x.append(s["T1"])
+            trajectory_y.append(s["T2"])
+
+        ax.plot(
+            trajectory_x,
+            trajectory_y,
+            '-o',
+            linewidth=2
+        )
+
+        ax.scatter(
+            step["T1"],
+            step["T2"],
+            s=200,
+            c='red'
+        )
+
+        ax.set_title(
+            f'Координатный спуск — шаг {step["step"] + 1}'
+        )
+
+        ax.set_xlabel("T1")
+        ax.set_ylabel("T2")
+
+        ax.grid(True)
+
+        self.canvas_2d.draw()
+    
+    def show_step(self):
+
+        if not self.step_history:
+            return
+
+        step = self.step_history[self.current_step]
+
+        method_name = self.method_combo.currentText().lower()
+
+        if "бокса" in method_name:
+            self.show_box_step(step)
+        else:
+            self.show_coordinate_step(step)
     
     def next_step(self):
         if self.current_step < len(self.step_history) - 1:
