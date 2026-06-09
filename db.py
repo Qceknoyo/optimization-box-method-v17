@@ -1,7 +1,13 @@
 import sqlite3
 import os
+import sys, os
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "mo_chp.db")
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)  # папка рядом с exe
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # папка рядом со скриптом
+
+DB_PATH = os.path.join(BASE_DIR, "mo_chp.db")
 
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
