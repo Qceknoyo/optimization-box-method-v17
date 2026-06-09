@@ -8,6 +8,7 @@ from PyQt6.QtCore import Qt
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 import sqlite3
+import random
 
 
 class Login(QWidget):
@@ -735,112 +736,141 @@ class ResearcherWindow(QWidget):
 
         self.init_empty_table()
 
-    def box_method(self, func, bounds, constraint, eps=0.1, max_iter=50):
-        import random
-        n = 2
-        N = 2 * n
+    @staticmethod
+    def _generate_initial_complex(bounds, constraint, n, N, max_attempts=10000):
         points = []
-        max_attempts = 10000
         attempts = 0
         while len(points) < N and attempts < max_attempts:
+            # Генерация в гиперкубе границ (ограничения 1-го рода)
             T1 = random.uniform(bounds[0][0], bounds[0][1])
             T2 = random.uniform(bounds[1][0], bounds[1][1])
-            if constraint(T1, T2):
-                points.append([T1, T2])
+            p = [T1, T2]
+            
+            # Проверка ограничений 2-го рода
+            if constraint(p[0], p[1]):
+                points.append(p)
+            else:
+                # Если уже есть хотя бы одна допустимая точка, смещаем недопустимую к центру
+                if len(points) >= 1:
+                    # Центр уже накопленных точек
+                    center = [sum(pt[i] for pt in points) / len(points) for i in range(2)]
+                    # Смещение на половину расстояния
+                    p = [0.5 * (p[i] + center[i]) for i in range(2)]
+                    # Повторная проверка; если всё равно недопустима – отбрасываем, генерируем новую
+                    if constraint(p[0], p[1]):
+                        points.append(p)
             attempts += 1
+        
         if len(points) < N:
-            raise ValueError(f"Не удалось найти {N} допустимых точек.")
+            raise ValueError(f"Не удалось построить комплекс из {N} точек после {max_attempts} попыток")
+        return points
 
+    def box_method(self, func, bounds, constraint, eps=0.1, max_iter=50):
+        n = 2
+        N = 2 * n
+        # Формирование комплекса с коррекцией
+        points = self._generate_initial_complex(bounds, constraint, n, N)
+        
         for _ in range(max_iter):
             values = [func(p[0], p[1]) for p in points]
-            worst = np.argmax(values)
-            best  = np.argmin(values)
+            worst_idx = int(np.argmax(values))
+            best_idx  = int(np.argmin(values))
+            
+            # Центр без худшей вершины
             center = [
-                sum(points[j][i] for j in range(N) if j != worst) / (N - 1)
+                sum(points[j][i] for j in range(N) if j != worst_idx) / (N - 1)
                 for i in range(n)
             ]
-            B = (abs(center[0] - points[worst][0]) + abs(center[0] - points[best][0]) +
-                abs(center[1] - points[worst][1]) + abs(center[1] - points[best][1])) / (2 * n)
+            
+            # Критерий останова
+            B = (abs(center[0] - points[worst_idx][0]) + abs(center[0] - points[best_idx][0]) +
+                abs(center[1] - points[worst_idx][1]) + abs(center[1] - points[best_idx][1])) / (2 * n)
             if B < eps:
                 break
-
-            # Шаг 6: новая точка
-            new = [2.3 * center[i] - 1.3 * points[worst][i] for i in range(n)]
-
-            # Шаг 7: ограничения 1-го рода
+            
+            # Отражение
+            new = [2.3 * center[i] - 1.3 * points[worst_idx][i] for i in range(n)]
+            
+            # Коррекция по границам (1-го рода)
             new[0] = max(bounds[0][0], min(bounds[0][1], new[0]))
             new[1] = max(bounds[1][0], min(bounds[1][1], new[1]))
-
-            # Шаг 7: ограничения 2-го рода
+            
+            # Коррекция по общим ограничениям (2-го рода)
             for _ in range(100):
                 if constraint(new[0], new[1]):
                     break
                 new = [0.5 * (new[i] + center[i]) for i in range(n)]
-
-            # ШАГ 9: если новая точка хуже худшей — смещаем к лучшей
-            F_new   = func(new[0], new[1])
-            F_worst = values[worst]
+            
+            # проверка улучшения и смещение к лучшей вершине 
+            F_new = func(new[0], new[1])
+            F_worst = values[worst_idx]
             for _ in range(100):
-                if F_new <= F_worst:
+                if F_new <= F_worst:   # для минимизации
                     break
-                new = [0.5 * (new[i] + points[best][i]) for i in range(n)]
+                # смещаем к лучшей вершине
+                new = [0.5 * (new[i] + points[best_idx][i]) for i in range(n)]
+                # после смещения проверяем ограничения 2-го рода
+                for __ in range(20):
+                    if constraint(new[0], new[1]):
+                        break
+                    # если нарушено – смещаем к центру (без худшей)
+                    new = [0.5 * (new[i] + center[i]) for i in range(n)]
                 F_new = func(new[0], new[1])
-
-            points[worst] = new
-
+            # ----------------------------------------------------------
+            
+            points[worst_idx] = new
+        
         final_vals = [func(p[0], p[1]) for p in points]
-        best_idx = np.argmin(final_vals)
+        best_idx = int(np.argmin(final_vals))
         return points[best_idx][0], points[best_idx][1], final_vals[best_idx]
     
-    def coordinate_search(self, func, bounds, constraint,
-                        eps=0.1, max_iter=100):
-
+    def coordinate_search(self, func, bounds, constraint, eps=0.1, max_iter=100):
+        # Начальная точка: центр гиперкуба
         T1 = (bounds[0][0] + bounds[0][1]) / 2
         T2 = (bounds[1][0] + bounds[1][1]) / 2
 
-        while not constraint(T1, T2):
-            T2 += 1
+        # Принудительная корректиркция точкт, чтобы она удовлетворяла ограничению T2 - T1 >= 1
+
+        if not constraint(T1, T2):
+            # поднятие T2
+            needed_T2 = T1 + 1
+            if needed_T2 <= bounds[1][1]:
+                T2 = needed_T2
+            else:
+                # Если не хватает места сверху, опускается T1
+                T1 = bounds[1][1] - 1
+                T2 = bounds[1][1]
+                if T1 < bounds[0][0]:
+                    T1 = bounds[0][0]
+                    T2 = T1 + 1
+                    if T2 > bounds[1][1]:
+                        raise ValueError("Нет допустимой точки в заданных границах и ограничениях")
 
         step = 1.0
-
         best_value = func(T1, T2)
 
         for _ in range(max_iter):
-
             improved = False
-
             candidates = [
                 (T1 + step, T2),
                 (T1 - step, T2),
                 (T1, T2 + step),
                 (T1, T2 - step)
             ]
-
             for new_T1, new_T2 in candidates:
-
                 if not constraint(new_T1, new_T2):
                     continue
-
                 if not (bounds[0][0] <= new_T1 <= bounds[0][1]):
                     continue
-
                 if not (bounds[1][0] <= new_T2 <= bounds[1][1]):
                     continue
-
                 value = func(new_T1, new_T2)
-
                 if value < best_value:
-
-                    T1 = new_T1
-                    T2 = new_T2
-
+                    T1, T2 = new_T1, new_T2
                     best_value = value
-
                     improved = True
-
             if not improved:
                 step /= 2
-
             if step < eps:
                 break
 
@@ -912,194 +942,74 @@ class ResearcherWindow(QWidget):
 
         return history
 
-    def box_method_steps(
-            self,
-            func,
-            bounds,
-            constraint,
-            eps=0.1,
-            max_iter=50,
-            initial_points=None
-    ):
-        import random
-
+    def box_method_steps(self, func, bounds, constraint, eps=0.1, max_iter=50, initial_points=None):
         n = 2
         N = 2 * n
-
-        # --------------------------
-        # Формирование комплекса
-        # --------------------------
-
+        
         if initial_points is not None:
-
             points = [p[:] for p in initial_points]
-
         else:
-
-            points = []
-
-            attempts = 0
-
-            while len(points) < N and attempts < 10000:
-
-                T1 = random.uniform(bounds[0][0], bounds[0][1])
-                T2 = random.uniform(bounds[1][0], bounds[1][1])
-
-                if constraint(T1, T2):
-                    points.append([T1, T2])
-
-                attempts += 1
-
-            if len(points) < N:
-                raise ValueError(
-                    "Не удалось построить начальный комплекс"
-                )
-
+            points = self._generate_initial_complex(bounds, constraint, n, N)
+        
         history = []
-
-        # --------------------------
-        # Основной цикл метода Бокса
-        # --------------------------
-
+        
         for step in range(max_iter):
-
-            values = [
-                func(p[0], p[1])
-                for p in points
-            ]
-
-            worst_idx = np.argmax(values)
-            best_idx = np.argmin(values)
-
+            values = [func(p[0], p[1]) for p in points]
+            worst_idx = int(np.argmax(values))
+            best_idx  = int(np.argmin(values))
+            
             center = [
-
-                sum(
-                    points[j][i]
-                    for j in range(N)
-                    if j != worst_idx
-                ) / (N - 1)
-
+                sum(points[j][i] for j in range(N) if j != worst_idx) / (N - 1)
                 for i in range(n)
             ]
-
-            B = (
-
-                abs(center[0] - points[worst_idx][0]) +
-                abs(center[0] - points[best_idx][0]) +
-
-                abs(center[1] - points[worst_idx][1]) +
-                abs(center[1] - points[best_idx][1])
-
-            ) / (2 * n)
-
+            
+            B = (abs(center[0] - points[worst_idx][0]) + abs(center[0] - points[best_idx][0]) +
+                abs(center[1] - points[worst_idx][1]) + abs(center[1] - points[best_idx][1])) / (2 * n)
+            
             history.append({
-
                 "step": step,
-
                 "points": [p[:] for p in points],
-
                 "values": values[:],
-
                 "best_idx": best_idx,
-
                 "worst_idx": worst_idx,
-
                 "center": center[:],
-
                 "B": B
-
             })
-
-            # критерий остановки
+            
             if B < eps:
                 break
-
-            # --------------------------
-            # отражение
-            # --------------------------
-
-            new_point = [
-
-                2.3 * center[i]
-                - 1.3 * points[worst_idx][i]
-
-                for i in range(n)
-            ]
-
-            # --------------------------
-            # ограничения первого рода
-            # --------------------------
-
-            new_point[0] = max(
-                bounds[0][0],
-                min(bounds[0][1], new_point[0])
-            )
-
-            new_point[1] = max(
-                bounds[1][0],
-                min(bounds[1][1], new_point[1])
-            )
-
-            # --------------------------
-            # ограничения второго рода
-            # --------------------------
-
+            
+            # Отражение
+            new = [2.3 * center[i] - 1.3 * points[worst_idx][i] for i in range(n)]
+            
+            # Коррекция по границам
+            new[0] = max(bounds[0][0], min(bounds[0][1], new[0]))
+            new[1] = max(bounds[1][0], min(bounds[1][1], new[1]))
+            
+            # Коррекция по ограничениям 2-го рода
             for _ in range(100):
-
-                if constraint(
-                    new_point[0],
-                    new_point[1]
-                ):
+                if constraint(new[0], new[1]):
                     break
-
-                new_point = [
-
-                    0.5 * (
-                        new_point[i]
-                        + center[i]
-                    )
-
-                    for i in range(n)
-                ]
-
-            # --------------------------
-            # шаг 9 метода Бокса
-            # --------------------------
-
-            F_new = func(
-                new_point[0],
-                new_point[1]
-            )
-
+                new = [0.5 * (new[i] + center[i]) for i in range(n)]
+            
+            # ДОБАВЛЕН ШАГ 9 
+            F_new = func(new[0], new[1])
             F_worst = values[worst_idx]
-
             for _ in range(100):
-
                 if F_new <= F_worst:
                     break
-
-                new_point = [
-
-                    0.5 * (
-                        new_point[i]
-                        + points[best_idx][i]
-                    )
-
-                    for i in range(n)
-                ]
-
-                F_new = func(
-                    new_point[0],
-                    new_point[1]
-                )
-
-            # --------------------------
-            # замена худшей точки
-            # --------------------------
-
-            points[worst_idx] = new_point
+                # смещение к лучшей вершине
+                new = [0.5 * (new[i] + points[best_idx][i]) for i in range(n)]
+                # после смещения проверяем ограничения 2-го рода
+                for __ in range(20):
+                    if constraint(new[0], new[1]):
+                        break
+                    new = [0.5 * (new[i] + center[i]) for i in range(n)]
+                F_new = func(new[0], new[1])
+            # ================================================
             
-
+            points[worst_idx] = new
+        
         return history
     
     def calculate(self):

@@ -5,7 +5,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('mo_chp.db', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
